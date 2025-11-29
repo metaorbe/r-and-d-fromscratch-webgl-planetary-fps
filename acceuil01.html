@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lunar Prototype — Accueil</title>
+  <style>
+    :root{
+      --bg:#0b0f17; --panel:#121826; --ring:#7aa2ff; --text:#e6edf7; --muted:#9aa4b2;
+    }
+    html,body{height:100%}
+    *{box-sizing:border-box}
+    body{
+      margin:0; background: radial-gradient(1200px 800px at 50% -20%, #1a2350 0%, var(--bg) 60%) fixed, var(--bg);
+      color:var(--text); display:grid; place-items:center; font:16px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Helvetica,Arial;
+      overflow:hidden;
+    }
+    .stack{ position:relative; width:min(82vmin,720px); aspect-ratio: 1 / 1; display:grid; place-items:center; cursor:pointer; }
+    .frame{ position:absolute; inset:0; border-radius:24px; border:1px solid rgba(255,255,255,.08); background: color-mix(in oklab, var(--panel), black 6%);
+            box-shadow: 0 12px 40px rgba(0,0,0,.45), inset 0 0 0 1px rgba(255,255,255,.04);
+            transform: translateZ(0); will-change: transform, opacity; }
+  
+    .f1{ inset:4%; filter: blur(.0px);  animation: drift1 6s linear infinite; }
+    .f2{ inset:8%; filter: blur(.2px);  animation: drift2 8s linear infinite; }
+    .f3{ inset:12%; filter: blur(.4px); animation: drift3 10s linear infinite; }
+    .f4{ inset:16%; filter: blur(.6px); animation: drift4 12s linear infinite; }
+    .f5{ inset:20%; filter: blur(.8px); animation: drift5 14s linear infinite; }
+
+    @keyframes drift1{ 0%{transform:rotate(0deg)} 100%{transform:rotate(360deg)} }
+    @keyframes drift2{ 0%{transform:rotate(0deg) scale(1.01)} 100%{transform:rotate(-360deg) scale(1.01)} }
+    @keyframes drift3{ 0%{transform:rotate(0deg) scale(1.02)} 100%{transform:rotate(360deg) scale(1.02)} }
+    @keyframes drift4{ 0%{transform:rotate(0deg) scale(1.03)} 100%{transform:rotate(-360deg) scale(1.03)} }
+    @keyframes drift5{ 0%{transform:rotate(0deg) scale(1.04)} 100%{transform:rotate(360deg) scale(1.04)} }
+
+ 
+    .enter{ position:relative; z-index:2; display:grid; place-items:center; gap:.5rem; text-align:center; padding:1.1rem 1.35rem; border-radius:16px;
+            background: rgba(10,16,30,.55); border:1px solid rgba(255,255,255,.12); backdrop-filter: blur(4px);
+            box-shadow: 0 8px 28px rgba(0,0,0,.35); }
+    .enter-title{ font-weight:800; letter-spacing:.3px; font-size: clamp(1.1rem, 2.6vw, 1.6rem); }
+    .enter-sub{ color:var(--muted); font-size:.95rem; }
+    .pulse{ position:absolute; inset:-6px; border-radius:inherit; pointer-events:none; box-shadow: 0 0 0 0 rgba(122,162,255,.55); animation:pulse 2.2s ease-out infinite; }
+    @keyframes pulse{ 0%{ box-shadow: 0 0 0 0 rgba(122,162,255,.55);} 70%{ box-shadow: 0 0 0 16px rgba(122,162,255,0);} 100%{ box-shadow: 0 0 0 0 rgba(122,162,255,0);} }
+
+
+    .stack:focus-visible .enter{ outline:3px solid rgba(122,162,255,.35); outline-offset:4px }
+    .stack:hover .enter{ transform: translateY(-1px); }
+
+
+    @media (prefers-reduced-motion: reduce){
+      .frame{ animation: none !important }
+      .pulse{ display:none }
+    }
+
+    footer{ position:fixed; bottom:.75rem; left:0; right:0; display:flex; justify-content:center; color:var(--muted); font-size:.85rem }
+    a.skip{ position:fixed; left:8px; top:8px; background:#000; color:#fff; padding:.4rem .6rem; border-radius:8px; transform: translateY(-140%);}
+    a.skip:focus{ transform:none }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#enter">Aller au bouton</a>
+
+  <main class="stack" id="stack" role="button" tabindex="0" aria-label="Entrer dans la démo Lunar">
+    <div class="frame f1"></div>
+    <div class="frame f2"></div>
+    <div class="frame f3"></div>
+    <div class="frame f4"></div>
+    <div class="frame f5"></div>
+
+    <div id="enter" class="enter">
+      <div class="pulse" aria-hidden="true"></div>
+      <div class="enter-title">Entrer dans la démo</div>
+      <div class="enter-sub">Clique au centre pour ouvrir <code>localhost:8000/index024.html</code></div>
+    </div>
+  </main>
+
+  <footer>Lunar Prototype — cliquer pour continuer</footer>
+
+  <noscript>
+    <div style="position:fixed; inset:auto 0 2.5rem 0; text-align:center; color:#ffcad3; font-weight:700">
+      JavaScript est requis. <a href="http://localhost:8000/index024.html" style="color:#fff">Ouvrir la démo</a>
+    </div>
+  </noscript>
+
+  <script>
+    const URL_TARGET = 'http://localhost:8000/index024.html';
+    const stack = document.getElementById('stack');
+    const go = () => window.location.href = URL_TARGET;
+    stack.addEventListener('click', go);
+    stack.addEventListener('keydown', (e)=>{ if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); go(); } });
+  </script>
+</body>
+</html>
