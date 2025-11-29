@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Lunar WebGL Maquette FPS</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { width: 100%; height: 100%; }
+        #instructions {
+            position: absolute; top: 10px; left: 10px; color: white; font-family: Arial;
+            background: rgba(0, 0, 0, 0.7); padding: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="instructions">Click to start FPS controls<br>ZQSD: Move, Space: Jump, Mouse Wheel: Zoom</div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+
+    <script>
+        // --- Scene Setup ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.00005, 1690); // near 0.05mm, far 1690km
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // --- Center Marker ---
+        const centerSphere = new THREE.Mesh(
+            new THREE.SphereGeometry(1500, 32, 32), // 1km radius
+            new THREE.MeshBasicMaterial({ color: 0xff0000 })
+        );
+        centerSphere.position.set(0, 0, 0);
+        scene.add(centerSphere);
+        console.log('Added center sphere at [0, 0, 0]');
+
+        // --- Axes Helper ---
+        const axesHelper = new THREE.AxesHelper(1700); // 1700km (X:red, Y:green, Z:blue)
+        scene.add(axesHelper);
+        console.log('Added axes helper at [0, 0, 0]');
+
+        // --- Test Cube ---
+        const cubeGeometry = new THREE.BoxGeometry(10, 10, 10);
+        const cubeMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+        const cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
+        cube.position.set(0, 0, 0);
+        scene.add(cube);
+        console.log('Added test cube at [0, 0, 0]');
+
+        // --- Matrix (NormMatrix, PopMatrix) ---
+        const moonRadius = 1601;
+        let normMatrix = null, popMatrix = null;
+        let popVectors = [];
+        const loader = new THREE.GLTFLoader();
+
+        // Load NormMatrix
+        loader.load('NormMatrix.gltf', (gltf) => {
+            normMatrix = gltf.scene;
+            normMatrix.traverse((child) => {
+                if (child.isMesh) {
+                    child.material = new THREE.MeshBasicMaterial({
+                        color: 0x0000ff,
+                        side: THREE.DoubleSide
+                    });
+                    if (child.geometry && !child.geometry.attributes.normal) {
+                        child.geometry.computeVertexNormals();
+                        console.log('Computed normals for NormMatrix');
+                    }
+                    console.log('NormMatrix geometry:', child.geometry.attributes);
+                    console.log('NormMatrix scale:', child.scale);
+                    console.log('NormMatrix position:', child.position);
+                }
+            });
+            normMatrix.position.set(0, 0, 0);
+            scene.add(normMatrix);
+            console.log('Loaded NormMatrix.gltf');
+            const boxNorm = new THREE.Box3().setFromObject(normMatrix);
+            console.log('NormMatrix bounding box:', boxNorm.min, boxNorm.max);
+        }, undefined, (error) => {
+            console.error('Error loading NormMatrix.gltf:', error);
+        });
+
+        // Load PopMatrix
+        loader.load('PopMatrix.gltf', (gltf) => {
+            popMatrix = gltf.scene;
+            popMatrix.traverse((child) => {
+                if (child.isMesh && child.geometry) {
+                    const positions = child.geometry.attributes.position.array;
+                    const indices = child.geometry.index ? child.geometry.index.array : null;
+                    if (indices) {
+                        for (let i = 0; i < indices.length; i += 3) {
+                            const a = indices[i] * 3, b = indices[i + 1] * 3, c = indices[i + 2] * 3;
+                            const v1 = new THREE.Vector3(positions[a], positions[a + 1], positions[a + 2]);
+                            const v2 = new THREE.Vector3(positions[b], positions[b + 1], positions[b + 2]);
+                            const v3 = new THREE.Vector3(positions[c], positions[c + 1], positions[c + 2]);
+                            const center = new THREE.Vector3().addVectors(v1, v2).add(v3).divideScalar(3);
+                            center.setLength(moonRadius + 0.1);
+                            popVectors.push(center);
+                        }
+                        console.log('PopMatrix vectors count:', popVectors.length);
+                        console.log('Sample popVectors distances:', popVectors.slice(0, 5).map(v => v.length()));
+                        if (popVectors.length > 1) {
+                            const marker = new THREE.Mesh(
+                                new THREE.SphereGeometry(0.5, 16, 16),
+                                new THREE.MeshBasicMaterial({ color: 0x00ffff })
+                            );
+                            marker.position.copy(popVectors[1]);
+                            scene.add(marker);
+                            console.log('Added popVectors[1] marker at', popVectors[1], 'Distance:', popVectors[1].length());
+                        }
+                    }
+                    console.log('PopMatrix vectors:', popVectors.length, 'Sample:', popVectors.slice(0, 5));
+                }
+            });
+
+            // Set initial player position
+            if (popVectors.length > 1 && popVectors[1].length() > moonRadius - 10 && popVectors[1].length() < moonRadius + 10) {
+                player.position.copy(popVectors[1]);
+                console.log('Initial player position set to popVectors[1]:', player.position);
+            } else {
+                console.warn('Invalid or empty popVectors, using default position');
+                player.position.set(0, moonRadius + 0.1, 0);
+            }
+            console.log('Player distance from center:', player.position.length());
+            camera.lookAt(0, 0, 0);
+
+            // Test raycast
+            const raycaster = new THREE.Raycaster();
+            raycaster.set(player.position, new THREE.Vector3(0, -1, 0));
+            const testIntersects = raycaster.intersectObject(normMatrix, true);
+            console.log('Test raycast on NormMatrix:', testIntersects);
+        }, undefined, (error) => {
+            console.error('Error loading PopMatrix.gltf:', error);
+        });
+
+        // --- Player (Camera for FPS) ---
+        const player = camera;
+
+        // --- PointerLockControls ---
+        const controls = new THREE.PointerLockControls(camera, renderer.domElement);
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, canJump = false;
+        document.addEventListener('click', () => controls.lock());
+        document.getElementById('instructions').addEventListener('click', () => controls.lock());
+        controls.addEventListener('lock', () => {
+            document.getElementById('instructions').style.display = 'none';
+            console.log('Controls locked');
+        });
+        controls.addEventListener('unlock', () => {
+            document.getElementById('instructions').style.display = 'block';
+            console.log('Controls unlocked');
+        });
+
+        // Keyboard controls (AZERTY)
+        document.addEventListener('keydown', (event) => {
+            switch (event.code) {
+                case 'KeyZ': moveForward = true; break;
+                case 'KeyS': moveBackward = true; break;
+                case 'KeyQ': moveLeft = true; break;
+                case 'KeyD': moveRight = true; break;
+                case 'Space': if (canJump) velocity.y += 0.01; canJump = false; break;
+            }
+        });
+        document.addEventListener('keyup', (event) => {
+            switch (event.code) {
+                case 'KeyZ': moveForward = false; break;
+                case 'KeyS': moveBackward = false; break;
+                case 'KeyQ': moveLeft = false; break;
+                case 'KeyD': moveRight = false; break;
+            }
+        });
+
+        // Zoom control (Blender-like)
+        document.addEventListener('wheel', (event) => {
+            camera.fov = Math.max(10, Math.min(100, camera.fov + event.deltaY * 0.05));
+            camera.updateProjectionMatrix();
+            console.log('Camera fov:', camera.fov);
+        });
+
+        // --- Physics ---
+        const gravity = 0.0096; // 3x original 0.0032
+        let velocity = new THREE.Vector3(0, 0, 0);
+        const dt = 1 / 60;
+        const moveSpeed = 0.00005;
+
+        // --- Repop ---
+        function repopPlayer() {
+            if (popVectors.length > 1 && popVectors[1].length() > moonRadius - 10 && popVectors[1].length() < moonRadius + 10) {
+                player.position.copy(popVectors[1]);
+                console.log('Repopped to popVectors[1]:', player.position);
+            } else {
+                console.warn('Invalid or empty popVectors, using default position');
+                player.position.set(0, moonRadius + 0.1, 0);
+            }
+            console.log('Player distance from center:', player.position.length());
+            velocity.set(0, 0, 0);
+            canJump = true;
+            camera.lookAt(0, 0, 0);
+        }
+
+        // --- NormMatrix Collision (Disabled) ---
+        const raycaster = new THREE.Raycaster();
+        function checkNormMatrixCollision() {
+            return false; // Disabled to allow falling
+        }
+
+        // --- Tile Collision ---
+        const tiles = [];
+        const tileMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+        for (let i = 1; i <= 10; i++) {
+            const path = `tiles/LOD5_map_${String(i).padStart(5, '0')}.gltf`;
+            loader.load(path, (gltf) => {
+                gltf.scene.traverse((child) => {
+                    if (child.isMesh) child.material = tileMaterial;
+                });
+                const faceIndex = i - 1;
+                const tilesPerFace = 256;
+                const face = Math.floor(faceIndex / tilesPerFace);
+                const localIndex = faceIndex % tilesPerFace;
+                const u = (localIndex % 16) / 16;
+                const v = Math.floor(localIndex / 16) / 16;
+                let pos;
+                if (face === 0) pos = new THREE.Vector3(u - 0.5, v - 0.5, 0.5);
+                else if (face === 1) pos = new THREE.Vector3(u - 0.5, 0.5, -(v - 0.5));
+                else if (face === 2) pos = new THREE.Vector3(u - 0.5, -(v - 0.5), -0.5);
+                else if (face === 3) pos = new THREE.Vector3(u - 0.5, -0.5, v - 0.5);
+                else if (face === 4) pos = new THREE.Vector3(-0.5, v - 0.5, u - 0.5);
+                else pos = new THREE.Vector3(0.5, v - 0.5, -(u - 0.5));
+                pos.multiplyScalar(moonRadius);
+                gltf.scene.position.copy(pos);
+                scene.add(gltf.scene);
+                tiles.push(gltf.scene);
+                console.log(`Loaded tile ${i} at`, pos);
+            }, undefined, (error) => {
+                console.error(`Error loading tile ${i}:`, error);
+            });
+        }
+
+        function checkTileCollision() {
+            const playerPos = player.position;
+            for (let tile of tiles) {
+                const tilePos = tile.position;
+                const dist = playerPos.distanceTo(tilePos);
+                const tileSize = 156.8;
+                if (dist < tileSize * 0.5) {
+                    player.position.setLength(moonRadius + 0.1);
+                    velocity.set(0, 0, 0);
+                    canJump = true;
+                    console.log('Landed on tile at', tilePos);
+                    return true;
+                }
+            }
+            // Temporary floor to stop falling
+            if (player.position.length() < moonRadius + 0.1) {
+                player.position.setLength(moonRadius + 0.1);
+                velocity.set(0, 0, 0);
+                canJump = true;
+                console.log('Hit temporary floor at moonRadius');
+                return true;
+            }
+            return false;
+        }
+
+        // --- Gravity Based on Normals ---
+        function getGravityDirection() {
+            if (!normMatrix) return new THREE.Vector3(0, -1, 0);
+            raycaster.set(player.position, new THREE.Vector3(0, -1, 0));
+            const intersects = raycaster.intersectObject(normMatrix, true);
+            console.log('Gravity raycast:', { position: player.position.clone(), direction: new THREE.Vector3(0, -1, 0), intersects });
+            if (intersects.length > 0 && intersects[0].normal) {
+                return intersects[0].normal.clone().negate();
+            }
+            console.warn('No valid normal found for NormMatrix, using default gravity');
+            return new THREE.Vector3(0, -1, 0);
+        }
+
+        // --- Lighting ---
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.0);
+        directionalLight.position.set(10000, 10000, 10000);
+        scene.add(directionalLight);
+        scene.add(new THREE.AmbientLight(0x404040, 0.5));
+
+        // --- Animation Loop ---
+        let lastLog = 0;
+        function animate(time) {
+            requestAnimationFrame(animate);
+
+            // Apply gravity (no collisions except floor)
+            if (!checkTileCollision()) {
+                const gravityDir = getGravityDirection();
+                velocity.addScaledVector(gravityDir, gravity * dt);
+
+                // Align player
+                controls.getObject().up.copy(gravityDir.clone().negate());
+            }
+
+            // Move player
+            const direction = new THREE.Vector3();
+            controls.getDirection(direction);
+            const right = new THREE.Vector3().crossVectors(direction, controls.getObject().up).normalize();
+            if (moveForward) velocity.addScaledVector(direction, moveSpeed * dt);
+            if (moveBackward) velocity.addScaledVector(direction, -moveSpeed * dt);
+            if (moveLeft) velocity.addScaledVector(right, -moveSpeed * dt);
+            if (moveRight) velocity.addScaledVector(right, moveSpeed * dt);
+            player.position.addScaledVector(velocity, dt);
+
+            // Log position
+            if (time - lastLog > 1000) {
+                console.log('Player position:', player.position, 'Velocity:', velocity);
+                console.log('Camera:', { position: camera.position, fov: camera.fov, near: camera.near, far: camera.far });
+                console.log('Player distance from center:', player.position.length());
+                lastLog = time;
+            }
+
+            renderer.render(scene, camera);
+        }
+        animate(0);
+
+        // --- Resize ---
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>

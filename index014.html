@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Lunar WebGL Maquette FPS</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { width: 100%; height: 100%; }
+        #instructions {
+            position: absolute; top: 10px; left: 10px; color: white; font-family: Arial;
+            background: rgba(0, 0, 0, 0.7); padding: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="instructions">Click to start FPS controls<br>WASD: Move, Space: Down, Shift: Up, Q: Stabilize, Mouse Wheel: Zoom</div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+
+    <script>
+        // --- Scene Setup ---
+        const scene = new THREE.Scene();
+        const playerView = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.20, 500000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // --- Center Marker (Red Sphere) ---
+        const centerSphere = new THREE.Mesh(
+            new THREE.SphereGeometry(1, 32, 32),
+            new THREE.MeshPhongMaterial({ color: 0xff0000, flatShading: true })
+        );
+        centerSphere.position.set(0, 0, 0);
+        scene.add(centerSphere);
+        console.log('Added center sphere at [0, 0, 0], radius: 1m');
+
+        // --- Axes Helper ---
+        const axesHelper = new THREE.AxesHelper(1700000);
+        scene.add(axesHelper);
+        console.log('Added axes helper at [0, 0, 0], size: 1700000m (1700km)');
+
+        // --- Test Cube (Yellow) ---
+        const cubeGeometry = new THREE.BoxGeometry(10000, 10000, 10000);
+        const cubeMaterial = new THREE.MeshPhongMaterial({ color: 0xffff00, flatShading: true });
+        const cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
+        cube.position.set(0, 0, 0);
+        scene.add(cube);
+        console.log('Added test cube at [0, 0, 0], size: 10000m (10km)');
+
+        // --- Matrix (NormMatrix, PopMatrix, LimitMatrix, PlayerEntity) ---
+        let normMatrix = null;
+        let normMatrixRadius = 0;
+        let normVertices = [];
+        let normNormals = [];
+        let popVectors = [];
+        let limitMatrix = null;
+        let limitMatrixRadius = 0;
+        let playerEntity = null;
+
+        // Load NormMatrix
+        const loader = new THREE.GLTFLoader();
+        loader.load('NormMatrix.gltf', (gltf) => {
+            normMatrix = gltf.scene;
+            normMatrix.traverse((child) => {
+                if (child.isMesh) {
+                    if (!child.material) {
+                        child.material = new THREE.MeshStandardMaterial({ color: 0x808080 });
+                    }
+                    if (child.geometry && !child.geometry.attributes.normal) {
+                        child.geometry.computeVertexNormals();
+                    }
+                    if (child.geometry) {
+                        const positions = child.geometry.attributes.position.array;
+                        const normals = child.geometry.attributes.normal.array;
+                        for (let i = 0; i < positions.length; i += 3) {
+                            normVertices.push(new THREE.Vector3(positions[i], positions[i + 1], positions[i + 2]).applyMatrix4(child.matrixWorld));
+                            normNormals.push(new THREE.Vector3(normals[i], normals[i + 1], normals[i + 2]).applyMatrix4(child.matrixWorld).normalize());
+                        }
+                    }
+                }
+            });
+            normMatrix.position.set(0, 0, 0);
+            scene.add(normMatrix);
+            const boxNorm = new THREE.Box3().setFromObject(normMatrix);
+            normMatrixRadius = Math.max(
+                Math.abs(boxNorm.max.x), Math.abs(boxNorm.min.x),
+                Math.abs(boxNorm.max.y), Math.abs(boxNorm.min.y),
+                Math.abs(boxNorm.max.z), Math.abs(boxNorm.min.z)
+            );
+            console.log('Loaded NormMatrix.gltf');
+            console.log('NormMatrix radius (m):', normMatrixRadius);
+            console.log('NormMatrix vertices count:', normVertices.length);
+        }, undefined, (error) => {
+            console.error('Error loading NormMatrix.gltf:', error);
+        });
+
+        // Load PopMatrix
+        loader.load('PopMatrix.gltf', (gltf) => {
+            const popMatrix = gltf.scene;
+            popMatrix.traverse((child) => {
+                if (child.isMesh && child.geometry) {
+                    const positions = child.geometry.attributes.position.array;
+                    for (let i = 0; i < positions.length; i += 3) {
+                        popVectors.push(new THREE.Vector3(positions[i], positions[i + 1], positions[i + 2]));
+                    }
+                    if (!child.material) {
+                        child.material = new THREE.MeshStandardMaterial({ color: 0x808080 });
+                    }
+                    if (child.geometry && !child.geometry.attributes.normal) {
+                        child.geometry.computeVertexNormals();
+                    }
+                }
+            });
+            popMatrix.position.set(0, 0, 0);
+            scene.add(popMatrix);
+            console.log('PopMatrix vectors count:', popVectors.length);
+            console.log('Loaded PopMatrix.gltf');
+
+            // Create Cyan Sphere Marker
+            const marker = new THREE.Mesh(
+                new THREE.SphereGeometry(500, 16, 16),
+                new THREE.MeshBasicMaterial({ color: 0x00ffff })
+            );
+            if (popVectors.length > 525) {
+                marker.position.copy(popVectors[525]);
+                console.log('Added marker at popVectors[525]:', marker.position, 'Distance:', marker.position.length(), 'm');
+            } else {
+                marker.position.set(0, 0, 1000);
+                console.log('Added marker at default position:', marker.position);
+            }
+            scene.add(marker);
+
+            // Set initial player position
+            if (popVectors.length > 525 && playerEntity) {
+                playerEntity.position.copy(popVectors[525]);
+                console.log('PlayerEntity position set to popVectors[525]:', playerEntity.position, 'm');
+                playerView.position.set(0, 2, 0);
+                console.log('PlayerView local position set to [0, 2, 0] (child of PlayerEntity)');
+            } else if (popVectors.length > 525) {
+                playerView.position.copy(popVectors[525]).add(new THREE.Vector3(0, 2, 0));
+                console.log('PlayerView position set to popVectors[525] + [0, 2, 0]:', playerView.position);
+            } else {
+                playerView.position.set(0, 2, 1000);
+                playerEntity && playerEntity.position.set(0, 0, 1000);
+                console.log('PlayerView position set to default:', playerView.position);
+            }
+        }, undefined, (error) => {
+            console.error('Error loading PopMatrix.gltf:', error);
+        });
+
+        // Load LimitMatrix
+        loader.load('LimitMatrix.gltf', (gltf) => {
+            limitMatrix = gltf.scene;
+            limitMatrix.traverse((child) => {
+                if (child.isMesh) {
+                    if (!child.material) {
+                        child.material = new THREE.MeshStandardMaterial({ color: 0x808080 });
+                    }
+                    if (child.geometry && !child.geometry.attributes.normal) {
+                        child.geometry.computeVertexNormals();
+                    }
+                }
+            });
+            limitMatrix.position.set(0, 0, 0);
+            scene.add(limitMatrix);
+            const boxLimit = new THREE.Box3().setFromObject(limitMatrix);
+            limitMatrixRadius = Math.max(
+                Math.abs(boxLimit.max.x), Math.abs(boxLimit.min.x),
+                Math.abs(boxLimit.max.y), Math.abs(boxLimit.min.y),
+                Math.abs(boxLimit.max.z), Math.abs(boxLimit.min.z)
+            );
+            console.log('Loaded LimitMatrix.gltf');
+            console.log('LimitMatrix radius (m):', limitMatrixRadius);
+        }, undefined, (error) => {
+            console.error('Error loading LimitMatrix.gltf:', error);
+        });
+
+        // Load PlayerEntity
+        loader.load('Player.gltf', (gltf) => {
+            playerEntity = gltf.scene;
+            playerEntity.matrixAutoUpdate = true;
+            playerEntity.rotation.order = 'YXZ';
+            playerEntity.traverse((child) => {
+                if (child.isMesh) {
+                    if (!child.material) {
+                        child.material = new THREE.MeshStandardMaterial({ color: 0xff0000, side: THREE.DoubleSide });
+                    }
+                    if (child.geometry && !child.geometry.attributes.normal) {
+                        child.geometry.computeVertexNormals();
+                    }
+                }
+            });
+            playerEntity.position.set(0, 0, 0);
+            playerEntity.rotation.set(0, 0, 0);
+            playerEntity.scale.set(1, 1, 1);
+            scene.add(playerEntity);
+            // Parent PlayerView to PlayerEntity
+            playerEntity.add(playerView);
+            playerView.position.set(0, 2, 0);
+            console.log('Loaded Player.gltf');
+            console.log('PlayerView parented to PlayerEntity at local position [0, 2, 0]');
+            if (popVectors.length > 525) {
+                playerEntity.position.copy(popVectors[525]);
+                console.log('PlayerEntity position set to popVectors[525]:', playerEntity.position, 'm');
+            }
+            // Parent controls pivot to PlayerEntity
+            playerEntity.add(pivotControls);
+        }, undefined, (error) => {
+            console.error('Error loading Player.gltf:', error);
+        });
+
+        // --- Player (PlayerView for FPS) ---
+        const player = playerEntity || playerView;
+
+        // --- PointerLockControls ---
+        const pivotControls = new THREE.Object3D();
+        scene.add(pivotControls);
+        const controls = new THREE.PointerLockControls(pivotControls, renderer.domElement);
+        const keyStates = { KeyW: false, KeyS: false, KeyA: false, KeyD: false, Space: false, ShiftLeft: false, KeyQ: false };
+        document.addEventListener('click', () => controls.lock());
+        document.getElementById('instructions').addEventListener('click', () => controls.lock());
+        controls.addEventListener('lock', () => {
+            document.getElementById('instructions').style.display = 'none';
+            console.log('Controls locked');
+        });
+        controls.addEventListener('unlock', () => {
+            document.getElementById('instructions').style.display = 'block';
+            console.log('Controls unlocked');
+        });
+
+        // --- Keyboard Controls (QWERTY) ---
+        document.addEventListener('keydown', (event) => {
+            if (keyStates[event.code] === undefined || keyStates[event.code]) return;
+            keyStates[event.code] = true;
+            switch (event.code) {
+                case 'KeyW': keyStates.KeyW = true; break;
+                case 'KeyS': keyStates.KeyS = true; break;
+                case 'KeyA': keyStates.KeyA = true; break;
+                case 'KeyD': keyStates.KeyD = true; break;
+                case 'Space': keyStates.Space = true; break;
+                case 'ShiftLeft': keyStates.ShiftLeft = true; break;
+                case 'KeyQ': keyStates.KeyQ = true; break;
+            }
+            console.log('Keyboard controls set up:', event.code);
+        });
+
+        document.addEventListener('keyup', (event) => {
+            if (keyStates[event.code] === undefined) return;
+            keyStates[event.code] = false;
+            switch (event.code) {
+                case 'KeyW': keyStates.KeyW = false; break;
+                case 'KeyS': keyStates.KeyS = false; break;
+                case 'KeyA': keyStates.KeyA = false; break;
+                case 'KeyD': keyStates.KeyD = false; break;
+                case 'Space': keyStates.Space = false; break;
+                case 'ShiftLeft': keyStates.ShiftLeft = false; break;
+                case 'KeyQ': keyStates.KeyQ = false; break;
+            }
+        });
+
+        // --- Zoom Control ---
+        document.addEventListener('wheel', (event) => {
+            playerView.fov = Math.max(10, Math.min(100, playerView.fov + event.deltaY * 0.1));
+            playerView.updateProjectionMatrix();
+            console.log('PlayerView fov:', playerView.fov);
+        });
+
+        // --- Physics ---
+        const gravity = 1000;
+        let velocity = new THREE.Vector3(0, 0, 0);
+        const dt = 1 / 60;
+        const moveSpeed = 10000;
+        let stabilizationFactor = 0;
+        let prevNormal = new THREE.Vector3(0, 1, 0);
+
+        // --- Collision (NormMatrix and LimitMatrix) ---
+        let lastCollisionLog = 0;
+        function checkMatrixCollision(time) {
+            let collided = false;
+            const position = playerEntity ? playerEntity.position : playerView.position;
+            if (normMatrix && popVectors.length > 525 && position.length() <= normMatrixRadius) {
+                playerEntity.position.copy(popVectors[525]);
+                velocity.set(0, 0, 0);
+                console.log('PlayerEntity repositioned to popVectors[525]:', playerEntity.position);
+                collided = true;
+                if (time - lastCollisionLog > 1000) {
+                    console.log('Collided with NormMatrix at distance:', position.length(), 'm');
+                    lastCollisionLog = time;
+                }
+            }
+            if (limitMatrix && position.length() >= limitMatrixRadius) {
+                position.setLength(limitMatrixRadius - 1000000);
+                velocity.set(0, 0, 0);
+                collided = true;
+                if (time - lastCollisionLog > 1000) {
+                    console.log('Collided with LimitMatrix at distance:', position.length(), 'm');
+                    lastCollisionLog = time;
+                }
+            }
+            return collided;
+        }
+
+        // --- Lighting ---
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+        directionalLight.position.set(10000000, 10000000, 10000000);
+        scene.add(directionalLight);
+        scene.add(new THREE.AmbientLight(0x404040, 0.2));
+
+        // --- Animation Loop ---
+        let lastLog = 0;
+        let lastTime = 0;
+        function animate(time) {
+            requestAnimationFrame(animate);
+
+            // Update stabilization factor
+            if (keyStates.KeyQ) {
+                stabilizationFactor = Math.min(stabilizationFactor + dt, 1); // Ramp up in ~1s
+            } else {
+                stabilizationFactor = Math.max(stabilizationFactor - dt, 0); // Ramp down
+            }
+
+            // Compute surface normal from NormMatrix vertices
+            let normal = playerEntity ? playerEntity.position.clone().normalize() : new THREE.Vector3(0, 1, 0);
+            if (playerEntity && normVertices.length > 0) {
+                let minDist = Infinity;
+                let closestNormal = new THREE.Vector3(0, 1, 0);
+                for (let i = 0; i < normVertices.length; i++) {
+                    const dist = playerEntity.position.distanceToSquared(normVertices[i]);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        closestNormal.copy(normNormals[i]);
+                    }
+                }
+                normal.copy(closestNormal);
+                normal.lerp(prevNormal, 0.1); // Smooth normal
+                prevNormal.copy(normal);
+            }
+
+            // Apply gravity
+            if (!checkMatrixCollision(time)) {
+                const position = playerEntity ? playerEntity.position : playerView.position;
+                velocity.addScaledVector(normal.clone().negate(), gravity * dt); // Gravity towards surface
+            }
+
+            // Apply stabilization force
+            if (playerEntity && stabilizationFactor > 0) {
+                velocity.addScaledVector(normal, gravity * stabilizationFactor * dt); // Counter gravity
+            }
+
+            // Move player
+            if (playerEntity) {
+                const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(playerEntity.quaternion);
+                const right = new THREE.Vector3(1, 0, 0).applyQuaternion(playerEntity.quaternion);
+                if (keyStates.KeyW) velocity.addScaledVector(forward, moveSpeed * dt);
+                if (keyStates.KeyS) velocity.addScaledVector(forward, -moveSpeed * dt);
+                if (keyStates.KeyA) velocity.addScaledVector(right, -moveSpeed * dt);
+                if (keyStates.KeyD) velocity.addScaledVector(right, moveSpeed * dt);
+                if (keyStates.Space) velocity.addScaledVector(normal.clone().negate(), moveSpeed * dt);
+                if (keyStates.ShiftLeft) velocity.addScaledVector(normal, moveSpeed * dt);
+            }
+            const position = playerEntity ? playerEntity.position : playerView.position;
+            position.addScaledVector(velocity, dt);
+
+            // Align PlayerEntity with surface normal
+            if (playerEntity) {
+                const up = new THREE.Vector3(0, 1, 0);
+                const alignQuaternion = new THREE.Quaternion().setFromUnitVectors(up, normal);
+                const euler = new THREE.Euler().setFromQuaternion(pivotControls.quaternion, 'YXZ');
+                const yawQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, euler.y, 0, 'YXZ'));
+                playerEntity.quaternion.copy(alignQuaternion).multiply(yawQuaternion);
+                // Update PlayerView rotation (pitch only)
+                playerView.rotation.set(euler.x, 0, 0);
+            }
+
+            // Log critical info every 1s
+            if (time - lastLog > 1000 && playerEntity) {
+                const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(playerEntity.quaternion);
+                console.log('FPS:', Math.round(1000 / (time - lastTime)));
+                console.log('PlayerEntity position (m):', playerEntity.position);
+                console.log('PlayerView position (m):', playerView.getWorldPosition(new THREE.Vector3()));
+                console.log('PlayerView local position:', playerView.position);
+                console.log('Surface normal (NormMatrix):', normal);
+                console.log('PlayerEntity up vector:', playerEntity.up.clone().applyQuaternion(playerEntity.quaternion));
+                console.log('Movement direction local:', forward);
+                console.log('Radial velocity:', keyStates.Space ? normal.clone().negate() : keyStates.ShiftLeft ? normal : new THREE.Vector3(0, 0, 0));
+                console.log('Stabilization factor:', stabilizationFactor);
+                console.log('Net radial velocity:', velocity.clone().dot(normal));
+                console.log('Dot product (should be ~0):', forward.dot(normal));
+                console.log('PlayerView rotation:', playerView.rotation.toVector3());
+                console.log('PlayerEntity rotation:', playerEntity.rotation.toVector3());
+                console.log('Yaw difference (rad):', Math.abs(playerView.rotation.y - playerEntity.rotation.y));
+                lastLog = time;
+            }
+            lastTime = time;
+
+            renderer.render(scene, playerView);
+        }
+        animate(0);
+
+        // --- Resize ---
+        window.addEventListener('resize', () => {
+            playerView.aspect = window.innerWidth / window.innerHeight;
+            playerView.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>

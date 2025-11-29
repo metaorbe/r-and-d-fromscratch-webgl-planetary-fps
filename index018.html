@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3D Scene with Mesh-Based Gravity</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+    #info { position: absolute; top: 10px; left: 10px; color: white; background: rgba(0, 0, 0, 0.7); padding: 10px; font-family: Arial; }
+  </style>
+</head>
+<body>
+  <div id="info">
+    Click to start FPS controls<br>
+    WASD: Move, Space: Down, Shift: Up, Q: Stabilize, Mouse Wheel: Zoom<br>
+    Right Click (hold): Pitch-only mode
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.153.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.153.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+    // Scene setup
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // Player and controls
+    const playerEntity = new THREE.Object3D();
+    playerEntity.position.set(1170936.875, 1170936.875, -298928.375); // From log
+    scene.add(playerEntity);
+    const controls = new PointerLockControls(camera, renderer.domElement);
+    playerEntity.add(camera);
+    camera.position.set(0, 2, 0); // Camera 2m above player (from log)
+
+    // Movement variables
+    let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+    let moveUp = false, moveDown = false, stabilize = false, pitchOnly = false;
+    const velocity = new THREE.Vector3();
+    const direction = new THREE.Vector3();
+    const speed = 10000; // Movement speed (adjusted for large scale)
+
+    // Raycaster for gravity
+    const raycaster = new THREE.Raycaster();
+    let normMatrix = null;
+    const gravityMagnitude = 9.81;
+    let gravityDirection = new THREE.Vector3(0, -1, 0); // Default fallback
+
+    // Load NormMatrix and Player models
+    const loader = new GLTFLoader();
+    loader.load('NormMatrix.gltf', (gltf) => {
+      normMatrix = gltf.scene;
+      normMatrix.scale.set(1, 1, 1); // Adjust if needed
+      scene.add(normMatrix);
+      console.log('NormMatrix loaded:', normMatrix);
+    }, undefined, (error) => {
+      console.error('Error loading NormMatrix:', error);
+    });
+
+    loader.load('Player.gltf', (gltf) => {
+      const playerModel = gltf.scene;
+      playerEntity.add(playerModel);
+      console.log('Player model loaded');
+    }, undefined, (error) => {
+      console.error('Error loading Player:', error);
+    });
+
+    // Add axes helper (from log)
+    const axesHelper = new THREE.AxesHelper(1700000);
+    scene.add(axesHelper);
+
+    // Add lighting
+    const ambientLight = new THREE.AmbientLight(0x404040);
+    scene.add(ambientLight);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+    directionalLight.position.set(1, 1, 1);
+    scene.add(directionalLight);
+
+    // Controls setup
+    document.addEventListener('click', () => controls.lock());
+    document.addEventListener('keydown', (event) => {
+      switch (event.code) {
+        case 'KeyW': moveForward = true; break;
+        case 'KeyS': moveBackward = true; break;
+        case 'KeyA': moveLeft = true; break;
+        case 'KeyD': moveRight = true; break;
+        case 'Space': moveDown = true; break;
+        case 'ShiftLeft': moveUp = true; break;
+        case 'KeyQ': stabilize = true; break;
+      }
+    });
+    document.addEventListener('keyup', (event) => {
+      switch (event.code) {
+        case 'KeyW': moveForward = false; break;
+        case 'KeyS': moveBackward = false; break;
+        case 'KeyA': moveLeft = false; break;
+        case 'KeyD': moveRight = false; break;
+        case 'Space': moveDown = false; break;
+        case 'ShiftLeft': moveUp = false; break;
+        case 'KeyQ': stabilize = false; break;
+      }
+    });
+    document.addEventListener('mousedown', (event) => {
+      if (event.button === 2) pitchOnly = true;
+    });
+    document.addEventListener('mouseup', (event) => {
+      if (event.button === 2) pitchOnly = false;
+    });
+    document.addEventListener('wheel', (event) => {
+      camera.fov = Math.max(10, Math.min(120, camera.fov + event.deltaY * 0.05));
+      camera.updateProjectionMatrix();
+    });
+
+    // Calculate gravity from mesh
+    function calculateGravityFromMesh() {
+      if (!normMatrix) return;
+
+      // Raycast from player position downwards (or towards estimated surface)
+      const playerPosition = playerEntity.position.clone();
+      const estimatedDirection = playerPosition.clone().negate().normalize(); // Towards center as initial guess
+      raycaster.set(playerPosition, estimatedDirection);
+      raycaster.far = 10000000; // Large distance for large scale
+
+      const intersects = raycaster.intersectObject(normMatrix, true);
+      if (intersects.length > 0) {
+        const intersection = intersects[0];
+        const normal = intersection.face.normal.clone().normalize();
+        console.log('Intersection found at:', intersection.point, 'Normal:', normal);
+
+        // Gravity direction is opposite to normal
+        gravityDirection = normal.negate();
+        velocity.add(gravityDirection.clone().multiplyScalar(gravityMagnitude));
+
+        // Align player to surface normal (smoothly)
+        const targetUp = normal.clone();
+        const targetQuaternion = new THREE.Quaternion().setFromUnitVectors(
+          new THREE.Vector3(0, 1, 0), targetUp
+        );
+        playerEntity.quaternion.slerp(targetQuaternion, 0.1); // Smooth rotation
+      } else {
+        console.warn('No intersection found for raycast. Using fallback gravity.');
+        gravityDirection = playerPosition.clone().negate().normalize();
+        velocity.add(gravityDirection.clone().multiplyScalar(gravityMagnitude));
+      }
+    }
+
+    // Animation loop
+    let prevTime = performance.now();
+    function animate() {
+      requestAnimationFrame(animate);
+      const time = performance.now();
+      const delta = (time - prevTime) / 1000;
+      prevTime = time;
+
+      // Apply gravity
+      calculateGravityFromMesh();
+
+      // Movement
+      direction.z = Number(moveForward) - Number(moveBackward);
+      direction.x = Number(moveRight) - Number(moveLeft);
+      direction.y = Number(moveUp) - Number(moveDown);
+      direction.normalize();
+
+      if (moveForward || moveBackward || moveLeft || moveRight || moveUp || moveDown) {
+        velocity.addScaledVector(direction, speed * delta);
+      }
+
+      // Stabilize (reset rotation to align with gravity)
+      if (stabilize) {
+        const targetUp = gravityDirection.clone().negate();
+        const targetQuaternion = new THREE.Quaternion().setFromUnitVectors(
+          new THREE.Vector3(0, 1, 0), targetUp
+        );
+        playerEntity.quaternion.copy(targetQuaternion);
+      }
+
+      // Apply velocity
+      velocity.multiplyScalar(0.99); // Damping
+      playerEntity.position.addScaledVector(velocity, delta);
+
+      // Restrict pitch in pitch-only mode
+      if (pitchOnly) {
+        const euler = new THREE.Euler().setFromQuaternion(camera.quaternion);
+        euler.y = playerEntity.rotation.y; // Lock yaw to player
+        camera.quaternion.setFromEuler(euler);
+      }
+
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // Handle window resize
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>

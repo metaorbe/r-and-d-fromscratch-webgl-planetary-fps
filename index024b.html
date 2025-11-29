@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Lunar WebGL Maquette FPS — Gravité radiale (intégré) + Mire persistante + Aim/Pitch Assist</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+    canvas { width: 100%; height: 100%; display: block; }
+    #instructions {
+      position: absolute; top: 10px; left: 10px; color: white; font-family: Arial, system-ui, sans-serif;
+      background: rgba(0,0,0,0.7); padding: 10px; border-radius: 8px; line-height: 1.35;
+      user-select: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="instructions">
+    Click to start FPS controls<br/>
+    WASD: Move, Space: Down, Shift: Up, Q: Stabilize, Mouse Wheel: Zoom
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+
+  <script>
+  // ---------- Scene & Renderer ----------
+  const scene = new THREE.Scene();
+  const playerView = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.5, 4000000);
+  const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // ---------- Helpers ----------
+  const centerSphere = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 16, 16),
+    new THREE.MeshPhongMaterial({ color: 0xff0000, flatShading: true })
+  );
+  scene.add(centerSphere);
+  scene.add(new THREE.AxesHelper(1700000));
+
+  // ---------- Test cube ----------
+  const cube = new THREE.Mesh(
+    new THREE.BoxGeometry(10000, 10000, 10000),
+    new THREE.MeshPhongMaterial({ color: 0xffff00, flatShading: true })
+  );
+  scene.add(cube);
+
+  // ---------- Look target marker (diamètre 1 km) ----------
+  const lookTargetMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(500, 16, 16),
+    new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+  );
+  scene.add(lookTargetMarker);
+
+  // ---------- Globals ----------
+  let normMatrix = null, normMatrixRadius = 0;
+  let limitMatrix = null, limitMatrixRadius = 0;
+  let popVectors = [];
+  let playerEntity = null;
+
+  const loader = new THREE.GLTFLoader();
+
+  function computeBoundingRadiusFromObject(root) {
+    const box = new THREE.Box3().setFromObject(root);
+    return Math.max(
+      Math.abs(box.max.x), Math.abs(box.min.x),
+      Math.abs(box.max.y), Math.abs(box.min.y),
+      Math.abs(box.max.z), Math.abs(box.min.z)
+    );
+  }
+
+  async function loadAllAssets() {
+    await Promise.all([
+      new Promise((resolve) => {
+        loader.load('NormMatrix.gltf', (gltf) => {
+          normMatrix = gltf.scene;
+          normMatrix.traverse((child) => {
+            if (child.isMesh) {
+              if (!child.material) child.material = new THREE.MeshStandardMaterial({ color: 0x808080, side: THREE.DoubleSide });
+              else child.material.side = THREE.DoubleSide;
+            }
+          });
+          normMatrix.position.set(0, 0, 0);
+          scene.add(normMatrix);
+          normMatrixRadius = computeBoundingRadiusFromObject(normMatrix);
+          resolve();
+        }, undefined, () => resolve());
+      }),
+
+      new Promise((resolve) => {
+        loader.load('PopMatrix.gltf', (gltf) => {
+          const popMatrix = gltf.scene;
+          popMatrix.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+              const positions = child.geometry.attributes.position.array;
+              for (let i = 0; i < positions.length; i += 3) {
+                popVectors.push(new THREE.Vector3(positions[i], positions[i+1], positions[i+2]));
+              }
+              if (!child.material) child.material = new THREE.MeshStandardMaterial({ color: 0x808080 });
+              if (child.geometry && !child.geometry.attributes.normal) child.geometry.computeVertexNormals();
+            }
+          });
+          popMatrix.position.set(0, 0, 0);
+          scene.add(popMatrix);
+
+          const marker = new THREE.Mesh(
+            new THREE.SphereGeometry(500, 12, 12),
+            new THREE.MeshBasicMaterial({ color: 0x00ffff })
+          );
+          if (popVectors.length > 525) marker.position.copy(popVectors[525]); else marker.position.set(0,0,1000);
+          scene.add(marker);
+          resolve();
+        }, undefined, () => resolve());
+      }),
+
+      new Promise((resolve) => {
+        loader.load('LimitMatrix.gltf', (gltf) => {
+          limitMatrix = gltf.scene;
+          limitMatrix.traverse((child) => {
+            if (child.isMesh) {
+              if (!child.material) child.material = new THREE.MeshStandardMaterial({ color: 0x808080 });
+              if (child.geometry && !child.geometry.attributes.normal) child.geometry.computeVertexNormals();
+              if (child.geometry) {
+                const positions = child.geometry.attributes.position.array;
+                for (let i = 0; i < positions.length; i += 3) {
+                  const v = new THREE.Vector3(positions[i], positions[i+1], positions[i+2]).applyMatrix4(child.matrixWorld);
+                  limitMatrixRadius = Math.max(limitMatrixRadius, v.length());
+                }
+              }
+            }
+          });
+          limitMatrix.position.set(0, 0, 0);
+          scene.add(limitMatrix);
+          resolve();
+        }, undefined, () => resolve());
+      }),
+
+      new Promise((resolve) => {
+        loader.load('Player.gltf', (gltf) => {
+          playerEntity = gltf.scene;
+          playerEntity.matrixAutoUpdate = true;
+          playerEntity.rotation.order = 'YXZ';
+          playerEntity.traverse((child) => {
+            if (child.isMesh) {
+              if (!child.material) child.material = new THREE.MeshStandardMaterial({ color: 0xff0000, side: THREE.DoubleSide });
+              if (child.geometry && !child.geometry.attributes.normal) child.geometry.computeVertexNormals();
+            }
+          });
+          scene.add(playerEntity);
+          playerEntity.add(playerView);
+          playerView.position.set(0, 2, 0);
+          if (popVectors.length > 525) playerEntity.position.copy(popVectors[525]); else playerEntity.position.set(0,0,1000);
+          playerEntity.add(pivotControls);
+
+          // init trackers
+          prevPlayerPos = playerEntity.position.clone();
+          prevUp = playerEntity.position.clone().normalize();
+          orientationInitialized = false; // alignera au premier frame
+          resolve();
+        }, undefined, () => resolve());
+      }),
+
+      new Promise((resolve) => {
+        loader.load('BlenderAxes.gltf', (gltf) => { scene.add(gltf.scene); resolve(); }, undefined, () => resolve());
+      })
+    ]);
+
+    // Fallback cam si pas de player
+    if (!playerEntity) playerView.position.set(0, 2, 1000);
+  }
+
+  // ---------- Controls ----------
+  const pivotControls = new THREE.Object3D();
+  scene.add(pivotControls);
+  const controls = new THREE.PointerLockControls(pivotControls, renderer.domElement);
+
+  const keyStates = { KeyW:false, KeyS:false, KeyA:false, KeyD:false, Space:false, ShiftLeft:false, KeyQ:false };
+  document.addEventListener('click', () => controls.lock());
+  document.getElementById('instructions').addEventListener('click', () => controls.lock());
+  controls.addEventListener('lock', () => { document.getElementById('instructions').style.display = 'none'; });
+  controls.addEventListener('unlock', () => { document.getElementById('instructions').style.display = 'block'; });
+
+  document.addEventListener('keydown', (e) => { if (e.code in keyStates) keyStates[e.code] = true; });
+  document.addEventListener('keyup',   (e) => { if (e.code in keyStates) keyStates[e.code] = false; });
+
+  document.addEventListener('wheel', (e) => {
+    playerView.fov = Math.max(10, Math.min(100, playerView.fov + e.deltaY * 0.1));
+    playerView.updateProjectionMatrix();
+  }, { passive: true });
+
+  let mouseMoved = false;
+  document.addEventListener('mousemove', () => { if (controls.isLocked) mouseMoved = true; });
+
+  // ---------- Physics & Orientation integrators ----------
+  const gravity = 1000;
+  let velocity = new THREE.Vector3(0,0,0);
+  let stabilizationFactor = 0;
+
+  // Orientation state (integrated)
+  let orientationInitialized = false;
+  let prevUp = new THREE.Vector3(0,1,0);
+  let yawInputPrev = 0;       // yaw lu depuis pivotControls (accumulé)
+  let pitchAngle = 0;         // pitch caméra intégré
+
+  // Look target state
+  let lookTargetPos = null;   // mire persistante (monde)
+  let prevPlayerPos = null;   // advection mire
+
+  // ---------- Collision ----------
+  let lastCollisionLog = 0;
+  function checkMatrixCollision(timeMs) {
+    const entity = playerEntity ?? playerView;
+    const p = entity.position;
+    let collided = false;
+
+    if (normMatrix && p.length() <= normMatrixRadius) {
+      if (playerEntity) playerEntity.position.copy(popVectors[525] || new THREE.Vector3(0,0,1000));
+      velocity.set(0,0,0); collided = true;
+      if (timeMs - lastCollisionLog > 5000) lastCollisionLog = timeMs;
+    }
+
+    if (limitMatrix && p.length() >= limitMatrixRadius) {
+      p.setLength(limitMatrixRadius - 1000000);
+      velocity.set(0,0,0); collided = true;
+      if (timeMs - lastCollisionLog > 5000) lastCollisionLog = timeMs;
+    }
+    return collided;
+  }
+
+  // ---------- Lights ----------
+  scene.add(new THREE.DirectionalLight(0xffffff, 1.5)).position.set(1e7,1e7,1e7);
+  scene.add(new THREE.AmbientLight(0x404040, 0.25));
+
+  // ---------- Animation ----------
+  let lastTime = performance.now();
+  function animate(nowMs) {
+    requestAnimationFrame(animate);
+    const dt = Math.min(0.05, (nowMs - lastTime) / 1000);
+    lastTime = nowMs;
+
+    if (!playerEntity) { renderer.render(scene, playerView); return; }
+
+    // Gravité radiale
+    const upNew = playerEntity.position.clone().normalize();
+
+    // Stabilisation
+    stabilizationFactor = keyStates.KeyQ ? Math.min(stabilizationFactor + dt, 1) : Math.max(stabilizationFactor - dt, 0);
+
+    // Gravity
+    if (!checkMatrixCollision(nowMs)) velocity.addScaledVector(upNew.clone().negate(), gravity * dt);
+    if (stabilizationFactor > 0)     velocity.addScaledVector(upNew, gravity * stabilizationFactor * dt);
+
+    // Déplacements
+    const forwardNow = new THREE.Vector3(0,0,-1).applyQuaternion(playerEntity.quaternion);
+    const rightNow   = new THREE.Vector3(1,0,0).applyQuaternion(playerEntity.quaternion);
+    if (keyStates.KeyW)      velocity.addScaledVector(forwardNow, 10000 * dt);
+    if (keyStates.KeyS)      velocity.addScaledVector(forwardNow, -10000 * dt);
+    if (keyStates.KeyA)      velocity.addScaledVector(rightNow,   -10000 * dt);
+    if (keyStates.KeyD)      velocity.addScaledVector(rightNow,    10000 * dt);
+    if (keyStates.Space)     velocity.addScaledVector(upNew.clone().negate(), 10000 * dt);
+    if (keyStates.ShiftLeft) velocity.addScaledVector(upNew, 10000 * dt);
+
+    playerEntity.position.addScaledVector(velocity, dt);
+
+    // Lire l'input souris courant (mais travailler en delta)
+    const euler = new THREE.Euler().setFromQuaternion(pivotControls.quaternion, 'YXZ');
+    const yawInputCurr = euler.y;
+    const pitchInputCurr = euler.x;
+
+    // ---------- Init orientation à la première frame ----------
+    if (!orientationInitialized) {
+      // Oriente Up (0,1,0) -> upNew, yaw = 0
+      const align0 = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), upNew);
+      playerEntity.quaternion.copy(align0);
+      yawInputPrev = yawInputCurr;
+      pitchAngle   = pitchInputCurr;
+      prevUp.copy(upNew);
+      orientationInitialized = true;
+    }
+
+    // ---------- Transport parallèle (préserve le heading, pas de twist) ----------
+    {
+      const qUp = new THREE.Quaternion().setFromUnitVectors(prevUp, upNew);
+      playerEntity.quaternion.premultiply(qUp);
+      prevUp.copy(upNew);
+    }
+
+    // ---------- Appliquer le delta de yaw AUTOUR de la gravité (pas Y monde) ----------
+    {
+      let dYaw = yawInputCurr - yawInputPrev;
+      dYaw = Math.atan2(Math.sin(dYaw), Math.cos(dYaw)); // normaliser [-pi,pi]
+      yawInputPrev = yawInputCurr;
+
+      if (Math.abs(dYaw) > 1e-6) {
+        const qYaw = new THREE.Quaternion().setFromAxisAngle(upNew, dYaw);
+        playerEntity.quaternion.premultiply(qYaw);
+      }
+    }
+
+    // ---------- MAJ de la mire (persistante + advectée) ----------
+    {
+      if (!lookTargetPos) lookTargetPos = new THREE.Vector3();
+
+      // cam pos/dir monde
+      const camPos = new THREE.Vector3();
+      const viewDir = new THREE.Vector3();
+      playerView.getWorldPosition(camPos);
+      playerView.getWorldDirection(viewDir);
+
+      // advection par déplacement joueur
+      if (!prevPlayerPos) prevPlayerPos = playerEntity.position.clone();
+      const deltaPos = playerEntity.position.clone().sub(prevPlayerPos);
+
+      if (mouseMoved && controls.isLocked) {
+        // relock à 100 km dans l'axe caméra
+        lookTargetPos.copy(camPos).add(viewDir.multiplyScalar(100000));
+      } else {
+        // suivre le déplacement
+        lookTargetPos.add(deltaPos);
+      }
+      lookTargetMarker.position.copy(lookTargetPos);
+      prevPlayerPos.copy(playerEntity.position);
+    }
+
+    // ---------- Aim‑assist (yaw) : corrige doucement vers la mire ----------
+    {
+      const fwdTangent = new THREE.Vector3(0,0,-1).applyQuaternion(playerEntity.quaternion).projectOnPlane(upNew);
+      const toTargetT  = lookTargetPos.clone().sub(playerEntity.position).projectOnPlane(upNew);
+      if (fwdTangent.lengthSq() > 1e-12 && toTargetT.lengthSq() > 1e-12) {
+        fwdTangent.normalize(); toTargetT.normalize();
+        const cross = new THREE.Vector3().crossVectors(fwdTangent, toTargetT);
+        const angle = Math.atan2(cross.dot(upNew), fwdTangent.dot(toTargetT));
+        const TURN_RATE = 4.0; // plus fort pour vaincre la dérive
+        const step = THREE.MathUtils.clamp(angle, -TURN_RATE*dt, TURN_RATE*dt);
+        if (Math.abs(step) > 1e-6) {
+          const qAssist = new THREE.Quaternion().setFromAxisAngle(upNew, step);
+          playerEntity.quaternion.premultiply(qAssist);
+        }
+      }
+    }
+
+    // ---------- Pitch caméra intégré + assist ----------
+    {
+      if (mouseMoved && controls.isLocked) {
+        // on prend la valeur input seulement quand la souris bouge
+        pitchAngle = pitchInputCurr;
+      } else {
+        // petite correction pour garder la mire en hauteur
+        const camPos = new THREE.Vector3();
+        const camDir = new THREE.Vector3();
+        playerView.getWorldPosition(camPos);
+        playerView.getWorldDirection(camDir);
+
+        const toTarget = lookTargetPos.clone().sub(camPos).normalize();
+        const camForwardT = camDir.clone().projectOnPlane(upNew).normalize();
+        const targetForwardT = toTarget.clone().projectOnPlane(upNew).normalize();
+
+        if (camForwardT.lengthSq() > 1e-12 && targetForwardT.lengthSq() > 1e-12) {
+          // signe via l'axe "right"
+          const rightAxis = new THREE.Vector3().crossVectors(upNew, camForwardT).normalize();
+          const pitchCurr  = Math.atan2(camDir.dot(upNew),     camDir.dot(camForwardT));
+          const pitchNeed  = Math.atan2(toTarget.dot(upNew),   toTarget.dot(targetForwardT));
+          let dPitch = pitchNeed - pitchCurr;
+          dPitch = Math.atan2(Math.sin(dPitch), Math.cos(dPitch));
+          const PITCH_RATE = 3.2;
+          const stepP = THREE.MathUtils.clamp(dPitch, -PITCH_RATE*dt, PITCH_RATE*dt);
+          pitchAngle += stepP;
+        }
+      }
+
+      // clamp pitch et appliquer localement
+      const MAX_PITCH = Math.PI/2 - 0.01;
+      pitchAngle = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, pitchAngle));
+      playerView.rotation.set(pitchAngle, 0, 0);
+    }
+
+    // reset flag souris après usage
+    mouseMoved = false;
+
+    renderer.render(scene, playerView);
+  }
+
+  // ---------- Start ----------
+  loadAllAssets().then(() => animate(performance.now()));
+
+  // ---------- Resize ----------
+  window.addEventListener('resize', () => {
+    playerView.aspect = window.innerWidth / window.innerHeight;
+    playerView.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+  </script>
+</body>
+</html>

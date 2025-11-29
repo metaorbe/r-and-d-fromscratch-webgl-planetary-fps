@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three.js Rotation de Scène - Vue Alignée</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { display: block; }
+    </style>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+    <script type="module">
+        // Grâce à l'importmap ci-dessus, ces imports fonctionneront correctement :
+        import * as THREE from 'three'; // Importe le module principal de Three.js
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'; // Importe le GLTFLoader
+
+        // 1. SCÈNE
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x222222);
+
+        // 2. CAMÉRA
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        // Position corrigée de la caméra pour l'alignement standard
+        // Z positif est "vers toi" par défaut dans Three.js.
+        // Pour avoir Z positif derrière et Y en haut, on place la caméra sur l'axe Z négatif.
+        // Si tu veux Z positif derrière, la caméra doit être sur Z négatif.
+        camera.position.set(0, 0, -3); // Place la caméra à 3 unités sur l'axe Z négatif
+        camera.lookAt(0, 0, 0); // La caméra pointe vers l'origine (centre des axes)
+
+        // 3. RENDERER
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // 4. AJOUT DE L'AXESHELPER
+        const axesHelper = new THREE.AxesHelper(1); // X=rouge, Y=vert, Z=bleu
+        scene.add(axesHelper);
+
+        // --- CHARGEMENT ET REDIMENSIONNEMENT D'UN MODÈLE GLTF ---
+
+        let gltfModel; // Variable pour stocker ton modèle GLTF
+
+        const loader = new GLTFLoader();
+        // REMPLACE 'AxesBlender.gltf' par le chemin exact vers ton fichier GLTF
+        // Assure-toi que ce fichier est au même niveau que ton index.html, ou ajuste le chemin.
+        const modelPath = 'AxesBlender.gltf'; 
+
+        loader.load(
+            modelPath,
+            function (gltf) {
+                gltfModel = gltf.scene; // La scène GLTF contient le modèle
+                scene.add(gltfModel); // Ajoute le modèle à ta scène Three.js
+
+                // Option 1: Centrer le modèle (très recommandé pour les GLTF)
+                const box = new THREE.Box3().setFromObject(gltfModel);
+                const center = box.getCenter(new THREE.Vector3());
+                gltfModel.position.sub(center); // Déplace le modèle pour centrer sa bounding box à (0,0,0)
+                
+                // Option 2: Redimensionner le modèle
+                const desiredHeight = 0.00001; // Tu peux changer cette valeur facilement
+                const size = box.getSize(new THREE.Vector3());
+                const modelHeight = size.y;
+                if (modelHeight > 0) { // Évite la division par zéro
+                    const scaleFactor = desiredHeight / modelHeight;
+                    gltfModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
+                } else {
+                    console.warn("La hauteur du modèle est nulle, impossible de le redimensionner.");
+                }
+
+                console.log('Modèle GLTF chargé et centré/redimensionné !');
+            },
+            // Fonction appelée pendant le chargement (optionnel)
+            function (xhr) {
+                console.log((xhr.loaded / xhr.total * 100) + '% chargé');
+            },
+            // Fonction appelée en cas d'erreur de chargement
+            function (error) {
+                console.error('Erreur lors du chargement du modèle GLTF :', error);
+            }
+        );
+        // 5. LUMIÈRE
+        const ambientLight = new THREE.AmbientLight(0x404040);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(5, 5, 5).normalize();
+        scene.add(directionalLight);
+
+        // --- GESTION PERSONNALISÉE DES ÉVÉNEMENTS SOURIS ---
+        let isDragging = false;
+        let previousMousePosition = {
+            x: 0,
+            y: 0
+        };
+
+        const rotationSpeed = 0.01;
+
+        renderer.domElement.addEventListener('mousedown', (e) => {
+            if (e.button === 0) {
+                isDragging = true;
+                previousMousePosition = {
+                    x: e.clientX,
+                    y: e.clientY
+                };
+            }
+        });
+
+        renderer.domElement.addEventListener('mouseup', () => {
+            isDragging = false;
+        });
+
+        renderer.domElement.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+
+            const deltaX = e.clientX - previousMousePosition.x;
+            const deltaY = e.clientY - previousMousePosition.y;
+
+            // Rotation horizontale (autour de l'axe Y global)
+            scene.rotation.y += deltaX * rotationSpeed;
+
+            // Rotation verticale (autour de l'axe X global)
+            // Note: Si le mouvement te semble inversé, change `+=` en `-=`
+            scene.rotation.x += deltaY * rotationSpeed;
+            // Limite la rotation sur X pour éviter le "gimbal lock" et les flips indésirables
+            scene.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, scene.rotation.x));
+
+            previousMousePosition = {
+                x: e.clientX,
+                y: e.clientY
+            };
+        });
+
+        // Gérer le redimensionnement de la fenêtre
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // 6. ANIMATION LOOP
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+
+        // Démarrer l'animation
+        animate();
+    </script>
+</body>
+</html>
